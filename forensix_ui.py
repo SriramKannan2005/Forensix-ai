@@ -536,8 +536,40 @@ class ForensiXApp(tk.Tk):
                              font=FONTS["mono_sm"], fg=C["text3"],
                              bg=C["bg3"]).pack(anchor="w", pady=(0, 4))
         else:
-            label(self._verdict_body, "No tampering detected.",
-                  color=C["green"], bg=C["bg2"]).pack(anchor="w", pady=8)
+            # Bug 5 fix: don't show "No tampering detected" when hard signals
+            # say otherwise. Check whether ELA flags or a suspicious/forged
+            # auth_score_tier are present and surface a warning instead.
+            hard_flag_keywords = ("HIGH_ELA_SUSPICION", "MODERATE_ELA_SUSPICION",
+                                  "CRITICAL", "HIGH_SUSPICION")
+            has_hard_flag = any(kw in f for f in flags for kw in hard_flag_keywords)
+            auth_tier     = report.get("aggregator", {}).get("auth_score_tier", "")
+            tier_suspicious = auth_tier in ("LIKELY_FORGED", "SUSPICIOUS", "UNCERTAIN")
+
+            if has_hard_flag or tier_suspicious:
+                # Signal-based evidence of tampering exists even though the LLM
+                # returned AUTHENTIC — surface a warning rather than a clean pass.
+                warn_frame = tk.Frame(self._verdict_body, bg=C["dim_yellow"])
+                warn_frame.pack(fill="x", pady=4)
+                tk.Label(
+                    warn_frame,
+                    text="  ⚠  LLM returned AUTHENTIC but hard forensic signals "
+                         "indicate possible tampering.",
+                    font=FONTS["mono_sm"], fg=C["yellow"],
+                    bg=C["dim_yellow"], wraplength=600, justify="left",
+                    anchor="w"
+                ).pack(fill="x", padx=8, pady=6)
+                tk.Label(
+                    warn_frame,
+                    text="  Check the SIGNALS tab for ELA evidence. "
+                         "Consider running with 'Detection only' ticked to see "
+                         "the signal-only verdict.",
+                    font=FONTS["mono_sm"], fg=C["text2"],
+                    bg=C["dim_yellow"], wraplength=600, justify="left",
+                    anchor="w"
+                ).pack(fill="x", padx=8, pady=(0, 6))
+            else:
+                label(self._verdict_body, "No tampering detected.",
+                      color=C["green"], bg=C["bg2"]).pack(anchor="w", pady=8)
 
         # Export button
         separator(self._verdict_body, pady=8)
@@ -939,21 +971,51 @@ class ForensiXApp(tk.Tk):
                 llm_result = run_llm_reasoning(enriched)
                 report.update(llm_result)
             else:
-                # Build minimal LLM-like result from detection signals alone
-                auth = detection.get("authenticity_score", 0.5)
+                # Build minimal LLM-like result from detection signals alone.
+                # Bug 4 fix: derive verdict from both auth_score AND active flags
+                # so "Detection only" mode reflects hard signal evidence correctly.
+                auth  = detection.get("authenticity_score", 0.5)
                 flags = detection.get("flags", [])
-                if auth > 0.7:
+
+                # Hard-flag escalation: if HIGH or MODERATE ELA suspicion is
+                # raised, floor the verdict to at least SUSPICIOUS regardless of
+                # the raw score (which is currently ELA-only and may be noisy).
+                if "HIGH_ELA_SUSPICION" in flags:
+                    if auth < 0.5:
+                        v = "TAMPERED"
+                    else:
+                        v = "SUSPICIOUS"
+                elif "MODERATE_ELA_SUSPICION" in flags:
+                    v = "SUSPICIOUS"
+                elif auth > 0.7:
                     v = "AUTHENTIC"
                 elif auth > 0.4:
                     v = "SUSPICIOUS"
                 else:
                     v = "TAMPERED"
+
+                # Build a minimal tampering_report so the verdict tab renders
+                # signal evidence rather than the blank "No tampering detected"
+                # message when signals indicate a problem.
+                skip_tampering = None
+                if v != "AUTHENTIC":
+                    skip_tampering = {
+                        "what_was_changed":  "Determined by signal analysis only — LLM skipped.",
+                        "when_was_changed":  "Unknown — metadata analyst skipped.",
+                        "how_was_changed":   "Unknown — AI pattern analyst skipped.",
+                        "tool_or_technique": "Unknown",
+                        "likely_tool_used":  "Unknown",
+                        "ai_artifacts":      [],
+                        "metadata_clues":    [],
+                        "tampering_sophistication": "Unknown",
+                    }
+
                 report["llm_reasoning"] = {
                     "final_verdict":      v,
                     "overall_confidence": "LOW",
                     "authenticity_score": auth,
                     "models_used":        {"env": "skipped"},
-                    "tampering_report":   None,
+                    "tampering_report":   skip_tampering,
                     "model_summaries":    {},
                     "model_analyses":     {},
                 }

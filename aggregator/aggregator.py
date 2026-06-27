@@ -77,6 +77,25 @@ AUTH_SCORE_TIERS = [
     (1.00, "AUTHENTIC"),
 ]
 
+# Frequency domain: high-freq energy ratio
+# Low = AI-smooth (missing sensor noise); high = normal camera texture
+FREQ_HIGH_RATIO_TIERS = [
+    (0.08,  "AI_SMOOTH"),
+    (0.12,  "SUSPICIOUSLY_SMOOTH"),
+    (0.20,  "SLIGHTLY_SMOOTH"),
+    (0.45,  "NORMAL"),
+    (1.00,  "HIGH_FREQ_HEAVY"),
+]
+
+# Noise block CV: how variable is local noise across the image?
+NOISE_CV_TIERS = [
+    (0.08, "AI_SMOOTH"),
+    (0.15, "VERY_CONSISTENT"),
+    (0.55, "CONSISTENT"),
+    (0.70, "SLIGHTLY_INCONSISTENT"),
+    (1.00, "HIGHLY_INCONSISTENT"),
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Required schema fields — validation
@@ -112,26 +131,51 @@ def _build_risk_profile(signals: dict, flags: list) -> dict:
     """
     Interpret each signal into a severity tier and build a risk summary.
     This is the enriched context that goes into LLM prompts.
+
+    Signal set (v2): ELA + noise texture + frequency domain + metadata flags
     """
-    ela_s   = signals.get("ela_suspicion", 0.0)
-    ela_m   = signals.get("ela_mean_diff", 0.0)
-    ela_v   = signals.get("ela_regional_variance", 0.0)
-    ela_e   = signals.get("ela_high_energy_ratio", 0.0)
-    noise_s = signals.get("noise_score")
+    ela_s    = signals.get("ela_suspicion", 0.0)
+    ela_m    = signals.get("ela_mean_diff", 0.0)
+    ela_v    = signals.get("ela_regional_variance", 0.0)
+    ela_e    = signals.get("ela_high_energy_ratio", 0.0)
+    noise_s  = signals.get("noise_score")
+    noise_cv = signals.get("noise_block_cv")
+    freq_hr  = signals.get("freq_high_ratio")
+    ai_smooth = signals.get("ai_smooth_flag", False)
+
+    # Metadata-derived risk indicators
+    meta_flags = signals.get("metadata", {}).get("metadata_flags", [])
+    has_ai_sig   = "AI_GENERATOR_SIGNATURE" in meta_flags
+    missing_exif = ("MISSING_EXIF_ON_JPEG" in meta_flags
+                    or "MISSING_EXIF_ON_PNG" in meta_flags)
+    no_camera    = "NO_CAMERA_DATA" in meta_flags
 
     risk = {
+        # ELA tiers
         "ela_suspicion_tier":    _tier(ela_s, ELA_SUSPICION_TIERS),
         "ela_mean_tier":         _tier(ela_m, ELA_MEAN_TIERS),
         "ela_variance_tier":     _tier(ela_v, ELA_VARIANCE_TIERS),
+        # Noise tiers
         "noise_tier":            _tier(noise_s, NOISE_TIERS) if noise_s is not None else "UNAVAILABLE",
+        "noise_cv_tier":         _tier(noise_cv, NOISE_CV_TIERS) if noise_cv is not None else "UNAVAILABLE",
+        # Frequency tier
+        "freq_tier":             _tier(freq_hr, FREQ_HIGH_RATIO_TIERS) if freq_hr is not None else "UNAVAILABLE",
+        # AI-generation specific
+        "ai_smooth_detected":    ai_smooth,
+        "ai_generator_signature": has_ai_sig,
 
-        # Count how many signals are in a warning state
+        # ── Warning signals (any single indicator that something is off) ───────
+        # Expanded from 5 to 9 signals now that we have metadata + noise + freq
         "signals_in_warning": sum([
-            ela_s > 0.35,
+            ela_s > 0.35,                              # ELA
             ela_m > 12.0,
             ela_v > 5.0,
             ela_e > 0.08,
-            (noise_s or 0) > 0.50,
+            (noise_s or 0) > 0.50,                    # noise inconsistency
+            noise_cv is not None and noise_cv < 0.10, # AI-smooth noise
+            freq_hr is not None and freq_hr < 0.15,   # low-freq spectrum
+            missing_exif,                              # metadata
+            no_camera,
         ]),
         "signals_in_critical": sum([
             ela_s > 0.55,
@@ -139,11 +183,14 @@ def _build_risk_profile(signals: dict, flags: list) -> dict:
             ela_v > 10.0,
             ela_e > 0.20,
             (noise_s or 0) > 0.65,
+            ai_smooth,                                 # AI-smooth is critical
+            has_ai_sig,                                # explicit AI sig is critical
+            freq_hr is not None and freq_hr < 0.09,   # extreme smoothness
         ]),
         "tamper_flags_active": [f for f in flags if "ERROR" not in f],
     }
 
-    # Overall risk level
+    # ── Overall risk level ────────────────────────────────────────────────────
     if risk["signals_in_critical"] >= 2:
         risk["overall_risk"] = "CRITICAL"
     elif risk["signals_in_critical"] >= 1 or risk["signals_in_warning"] >= 3:
@@ -266,14 +313,18 @@ def aggregator_report(enriched: dict) -> str:
         f"{'─'*52}",
         f"  Auth Score:       {enriched.get('authenticity_score', -1):.4f}  [{agg.get('auth_score_tier', 'N/A')}]",
         f"  Overall Risk:     {risk.get('overall_risk', 'N/A')}",
-        f"  Signals Warning:  {risk.get('signals_in_warning', 0)} / 5",
-        f"  Signals Critical: {risk.get('signals_in_critical', 0)} / 5",
+        f"  Signals Warning:  {risk.get('signals_in_warning', 0)} / 9",
+        f"  Signals Critical: {risk.get('signals_in_critical', 0)} / 8",
         f"  Active Flags:     {', '.join(risk.get('tamper_flags_active', [])) or 'NONE'}",
         f"",
         f"  ELA Suspicion:    {enriched.get('signals',{}).get('ela_suspicion','N/A')}  [{risk.get('ela_suspicion_tier','N/A')}]",
         f"  ELA Mean Diff:    {enriched.get('signals',{}).get('ela_mean_diff','N/A')}  [{risk.get('ela_mean_tier','N/A')}]",
         f"  ELA Variance:     {enriched.get('signals',{}).get('ela_regional_variance','N/A')}  [{risk.get('ela_variance_tier','N/A')}]",
         f"  Noise Score:      {enriched.get('signals',{}).get('noise_score','N/A')}  [{risk.get('noise_tier','N/A')}]",
+        f"  Noise CV:         {enriched.get('signals',{}).get('noise_block_cv','N/A')}  [{risk.get('noise_cv_tier','N/A')}]",
+        f"  Freq High Ratio:  {enriched.get('signals',{}).get('freq_high_ratio','N/A')}  [{risk.get('freq_tier','N/A')}]",
+        f"  AI Smooth:        {risk.get('ai_smooth_detected', False)}",
+        f"  AI Generator Sig: {risk.get('ai_generator_signature', False)}",
         f"",
         f"  Metadata Origin:  {meta.get('origin_guess','N/A')}",
         f"  Software Found:   {meta.get('software_found') or 'NONE'}",
