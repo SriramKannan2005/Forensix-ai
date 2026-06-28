@@ -24,7 +24,43 @@ import threading
 from typing import Optional
 from pathlib import Path
 
-from llm.provider import call_llm, get_active_models
+import requests
+
+from llm.provider import (
+    call_llm, get_active_models, ENV, OLLAMA_BASE, OLLAMA_MODELS,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ollama warm-up / health check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ping_model(model_name: str, base_url: str, timeout: int = 10) -> bool:
+    """Lightweight check that an Ollama model is reachable and responds."""
+    try:
+        resp = requests.post(
+            f"{base_url}/api/generate",
+            json={"model": model_name, "prompt": "hi", "stream": False},
+            timeout=timeout,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _warm_up_ollama() -> None:
+    """
+    In dev (Ollama) mode, ping each specialist model so a failure is logged
+    early. Never raises — a cold model may load slower than the ping timeout, so
+    inference is still attempted regardless of the ping result.
+    """
+    if ENV != "dev":
+        return
+    for role, model in OLLAMA_MODELS.items():
+        if not _ping_model(model, OLLAMA_BASE):
+            print(f"[reasoning_engine] WARNING: Ollama model '{model}' "
+                  f"({role}) did not respond to warm-up ping — inference will "
+                  f"still be attempted (cold start may take longer).")
 from llm.prompts import (
     build_visual_analyst_prompt,
     build_metadata_analyst_prompt,
@@ -323,6 +359,9 @@ def run_llm_reasoning(forensix_result: dict) -> dict:
     """
     start = time.time()
     active_models = get_active_models()
+
+    # Warm-up / health check (dev mode only; logs warnings, never raises)
+    _warm_up_ollama()
 
     results = {}
     errors  = {}

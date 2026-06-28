@@ -113,7 +113,17 @@ def _print_summary(image_path, report, gradcam_path, report_path):
     signals = det.get("signals", {})
     risk = agg.get("risk_profile", {})
 
-    verdict = llm.get("final_verdict", "UNKNOWN")
+    # The detector's signal-based verdict is authoritative so the displayed
+    # verdict can never contradict the authenticity score; the LLM verdict is
+    # only a fallback when the detector verdict is unavailable.
+    SIGNAL_VERDICTS = ("AI_GENERATED", "SUSPICIOUS_AI",
+                       "AUTHENTIC", "SUSPICIOUS", "FORGED")
+    det_verdict = det.get("verdict", "UNKNOWN")
+    llm_verdict = llm.get("final_verdict", "UNKNOWN")
+    if det_verdict in SIGNAL_VERDICTS:
+        verdict = det_verdict
+    else:
+        verdict = llm_verdict if llm_verdict not in ("UNKNOWN", None) else det_verdict
     auth = det.get("authenticity_score", -1)
     cnn_score = signals.get("cnn_score")
     cnn_label = signals.get("cnn_label", "N/A")

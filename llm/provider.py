@@ -82,7 +82,7 @@ def _call_ollama(role: str, prompt: str, image_path: Optional[str] = None) -> st
         response = requests.post(
             f"{OLLAMA_BASE}/api/generate",
             json=payload,
-            timeout=180
+            timeout=(30, 180)   # (connect timeout, read timeout)
         )
         response.raise_for_status()
         return response.json().get("response", "").strip()

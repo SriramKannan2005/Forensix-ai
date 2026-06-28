@@ -121,16 +121,20 @@ def generate_gradcam(
         else:
             cam_np = np.zeros_like(cam_np)
 
-        # Resize heatmap to original image size
-        heatmap = cv2.resize(cam_np, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
-        heatmap = np.clip(heatmap, 0.0, 1.0)
+        # Resize heatmap to the original image size via PIL. PIL.Image.resize
+        # takes (width, height) — passing (orig_w, orig_h) keeps the heatmap
+        # aligned with the image instead of confining it to one corner.
+        cam_uint8 = (np.clip(cam_np, 0.0, 1.0) * 255).astype(np.uint8)   # (h, w)
+        cam_pil = Image.fromarray(cam_uint8, mode="L")
+        cam_resized = cam_pil.resize((orig_w, orig_h), Image.BILINEAR)
+        heatmap = np.asarray(cam_resized, dtype=np.float32) / 255.0      # (orig_h, orig_w)
 
-        # Build JET colormap overlay (alpha=0.4)
-        heatmap_u8 = np.uint8(255 * heatmap)
+        # Build JET colormap overlay (alpha=0.4). Result shape: (orig_h, orig_w, 3)
+        heatmap_u8 = (heatmap * 255).astype(np.uint8)
         colored = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_JET)
         colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
 
-        orig_rgb = np.array(original.convert("RGB"))
+        orig_rgb = np.array(original.convert("RGB"))   # (orig_h, orig_w, 3)
         overlay_np = np.uint8(0.6 * orig_rgb + 0.4 * colored)
         overlay = Image.fromarray(overlay_np)
 

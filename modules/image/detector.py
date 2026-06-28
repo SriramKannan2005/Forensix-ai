@@ -61,7 +61,47 @@ PROPAGATE_META_FLAGS = {
     "AI_GENERATOR_SIGNATURE",
     "EDITING_SOFTWARE_DETECTED",
     "TIMESTAMP_MISMATCH",
+    "POSSIBLE_WHATSAPP_RECOMPRESSION",
 }
+
+
+def _determine_verdict(flags: list, cnn_score: Optional[float],
+                       cnn_error: Optional[str], authenticity_score: float) -> str:
+    """
+    Determine the overall verdict, with a dedicated AI-generation path.
+
+    The CNN is trained for splice/tamper detection, not AI generation, so a
+    confidently "not spliced" CNN score (low cnn_score) combined with AI-origin
+    signal flags (flat texture + no EXIF + no camera data) indicates a synthetic
+    image rather than an authentic photo.
+
+    Returns one of:
+      "AI_GENERATED" | "SUSPICIOUS_AI" | "AUTHENTIC" | "SUSPICIOUS" | "FORGED"
+    """
+    ai_smooth    = "AI_SMOOTH_DETECTED" in flags
+    missing_exif = "MISSING_EXIF_ON_PNG" in flags or "NO_EXIF_DATA" in flags
+    no_camera    = "NO_CAMERA_DATA" in flags
+
+    # When the CNN is unavailable, treat its score as "not informative" (1.0) so
+    # the AI rules (which require a LOW cnn_score) do not fire spuriously.
+    cnn_ok = cnn_error is None and cnn_score is not None
+    cs = float(cnn_score) if cnn_ok else 1.0
+    ai_flag_count = sum([ai_smooth, missing_exif, no_camera])
+
+    # ── AI-generation rules (checked in priority order) ───────────────────────
+    if ai_smooth and missing_exif and no_camera and cs < 0.5:
+        return "AI_GENERATED"
+    if ai_flag_count >= 2 and cs < 0.3:
+        return "AI_GENERATED"
+    if ai_smooth and cs < 0.3:
+        return "SUSPICIOUS_AI"
+
+    # ── Standard authenticity thresholds ──────────────────────────────────────
+    if authenticity_score >= 0.70:
+        return "AUTHENTIC"
+    if authenticity_score >= 0.40:
+        return "SUSPICIOUS"
+    return "FORGED"
 
 
 def analyze_image(image_path: str, save_heatmap: bool = True) -> dict:
@@ -174,60 +214,65 @@ def analyze_image(image_path: str, save_heatmap: bool = True) -> dict:
         #   0.0 = definitely tampered/forged, 1.0 = definitely authentic.
         #
         # With CNN available:   CNN 0.40 + ELA 0.25 + Noise 0.20 + Metadata 0.15
-        # Without CNN:          ELA 0.50 + Noise 0.30 + Metadata 0.20
-        #                       (or ELA 0.65 + Metadata 0.35 if noise also missing)
-        ela_component   = 1.0 - ela_suspicion
+        # Without CNN the remaining weights are re-normalised to sum to 1.0.
+        #
+        # NOTE: no hard floor is applied here — AI-generation is now surfaced via
+        # the dedicated AI_GENERATED verdict (see _determine_verdict), so capping
+        # the authenticity score (which previously pinned it at 0.50 and hid the
+        # CNN's confident contribution) is no longer needed.
+
+        def _clamp01(x):
+            return max(0.0, min(1.0, float(x)))
 
         # CNN component: cnn_score is P(FORGED); authenticity = 1 - P(FORGED).
         # Only used when the model loaded cleanly (cnn_error is None).
         if cnn_error is None and cnn_score is not None:
-            cnn_component = 1.0 - float(cnn_score)
+            cnn_component = 1.0 - _clamp01(cnn_score)
         else:
             cnn_component = None
 
-        noise_val = noise_sigs.get("noise_score")
-        if noise_val is not None:
-            noise_component = 1.0 - noise_val
-            # Penalise AI-smooth images regardless of absolute noise_score
-            if noise_sigs.get("ai_smooth_flag"):
-                noise_component = min(noise_component, 0.40)
-        else:
-            noise_component = None
+        # ELA component — ela_suspicion is already normalised to [0, 1].
+        ela_component = 1.0 - _clamp01(ela_suspicion)
 
-        # Metadata origin component
+        # Noise component — noise_score is already normalised to [0, 1].
+        noise_val = noise_sigs.get("noise_score")
+        noise_component = (1.0 - _clamp01(noise_val)) if noise_val is not None else None
+
+        # Metadata score: 1.0 = no flags, 0.5 = warning flags, 0.0 = critical flags.
+        # Social-media (WhatsApp) recompression softens the penalty to 0.6 because
+        # the missing EXIF is a benign artefact of sharing, not tampering.
         meta_flags = meta.get("metadata_flags", [])
-        meta_penalty = 0.0
-        if "AI_GENERATOR_SIGNATURE" in meta_flags:
-            meta_penalty = 0.70   # strong signal
-        elif "MISSING_EXIF_ON_PNG" in meta_flags and "NO_CAMERA_DATA" in meta_flags:
-            meta_penalty = 0.35   # moderate: PNG with no camera data
-        elif "MISSING_EXIF_ON_JPEG" in meta_flags:
-            meta_penalty = 0.25
-        elif "NO_CAMERA_DATA" in meta_flags:
-            meta_penalty = 0.15
-        meta_component = 1.0 - meta_penalty
+        CRITICAL_META_FLAGS = {"AI_GENERATOR_SIGNATURE"}
+        if any(f in CRITICAL_META_FLAGS for f in meta_flags):
+            metadata_score = 0.0
+        elif "POSSIBLE_WHATSAPP_RECOMPRESSION" in meta_flags:
+            metadata_score = 0.6
+        elif meta_flags:
+            metadata_score = 0.5
+        else:
+            metadata_score = 1.0
 
         # Blend — re-normalise weights over whichever components are available so
         # the score always stays in [0, 1] even when noise or CNN is missing.
         weighted = []   # (weight, component) pairs
         if cnn_component is not None:
             weighted.append((0.40, cnn_component))
-        weighted.append((0.25 if cnn_component is not None else 0.50, ela_component))
+        weighted.append((0.25, ela_component))
         if noise_component is not None:
-            weighted.append((0.20 if cnn_component is not None else 0.30, noise_component))
-        weighted.append((0.15 if cnn_component is not None else 0.20, meta_component))
+            weighted.append((0.20, noise_component))
+        weighted.append((0.15, metadata_score))
 
         total_w = sum(w for w, _ in weighted)
         authenticity_score = sum(w * c for w, c in weighted) / total_w
+        authenticity_score = round(_clamp01(authenticity_score), 4)
 
-        # Hard floor: if LOW_FREQ_ENERGY or AI_SMOOTH_DETECTED, cap score at 0.50
-        if "LOW_FREQ_ENERGY" in flags or "AI_SMOOTH_DETECTED" in flags:
-            authenticity_score = min(authenticity_score, 0.50)
+        # ── 6b. Verdict (AI-generation aware) ──────────────────────────────────
+        verdict = _determine_verdict(flags, cnn_score, cnn_error, authenticity_score)
+        signals["detection_verdict"] = verdict
 
-        authenticity_score = round(float(authenticity_score), 4)
         processing_time    = round(time.time() - start, 3)
 
-        return ForensixResult(
+        result = ForensixResult(
             module="image",
             file=path.name,
             processing_time=processing_time,
@@ -236,6 +281,9 @@ def analyze_image(image_path: str, save_heatmap: bool = True) -> dict:
             flags=flags,
             error=None
         ).to_dict()
+        # Surface the signal-based verdict at the top level for the aggregator/UI.
+        result["verdict"] = verdict
+        return result
 
     except Exception as e:
         return make_error_result("image", path.name, str(e))

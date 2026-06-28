@@ -68,11 +68,21 @@ VERDICT_COLORS = {
     "AUTHENTIC":           (C["green"],   C["dim_green"]),
     "SUSPICIOUS":          (C["yellow"],  C["dim_yellow"]),
     "TAMPERED":            (C["red"],     C["dim_red"]),
+    "FORGED":              (C["red"],     C["dim_red"]),
     "AI_ASSISTED_TAMPER":  (C["red"],     C["dim_red"]),
     "FULLY_AI_GENERATED":  (C["magenta"], C["dim_magenta"]),
+    "AI_GENERATED":        ("#9b59b6",    C["dim_magenta"]),
+    "SUSPICIOUS_AI":       ("#8e44ad",    C["dim_magenta"]),
     "HUMAN_EDITED":        (C["red"],     C["dim_red"]),
+    "DETECTION_ONLY":      (C["text3"],   C["bg3"]),
     "ERROR":               (C["text3"],   C["bg3"]),
     "UNKNOWN":             (C["text3"],   C["bg3"]),
+}
+
+# Human-readable badge labels for verdicts that aren't display-friendly as-is.
+VERDICT_DISPLAY = {
+    "AI_GENERATED":  "AI GENERATED",
+    "SUSPICIOUS_AI": "SUSPICIOUS AI",
 }
 
 RISK_COLORS = {
@@ -658,6 +668,25 @@ class ForensiXApp(tk.Tk):
         signals = det.get("signals", {})
         risk    = agg.get("risk_profile", {})
 
+        # ── AI-generation banner (prominent, top of tab) ──────────────────────
+        det_verdict = det.get("verdict", "UNKNOWN")
+        if det_verdict in ("AI_GENERATED", "SUSPICIOUS_AI"):
+            banner = tk.Frame(self._signals_inner, bg=C["dim_magenta"])
+            banner.pack(fill="x", padx=8, pady=(8, 2))
+            tk.Label(
+                banner, text="⚠ AI GENERATION DETECTED",
+                font=FONTS["heading"], fg="#9b59b6", bg=C["dim_magenta"],
+                anchor="w").pack(fill="x", padx=8, pady=(6, 0))
+            tk.Label(
+                banner,
+                text="This image appears to be AI-generated rather than a "
+                     "manipulated photograph. CNN tampering score is low (not "
+                     "spliced), but metadata and texture signals indicate "
+                     "synthetic origin.",
+                font=FONTS["mono_sm"], fg=C["text2"], bg=C["dim_magenta"],
+                wraplength=600, justify="left", anchor="w").pack(
+                    fill="x", padx=8, pady=(0, 6))
+
         def section(title):
             f = tk.Frame(self._signals_inner, bg=C["bg2"])
             f.pack(fill="x", padx=8, pady=(10, 2))
@@ -1210,17 +1239,33 @@ class ForensiXApp(tk.Tk):
         self._analyse_btn.configure(state="normal", text="▶  RUN FORENSIC ANALYSIS")
 
         llm     = report.get("llm_reasoning", {})
-        verdict = llm.get("final_verdict", "UNKNOWN")
         conf    = llm.get("overall_confidence", "")
 
+        # The badge uses the detector's signal-based verdict as the single source
+        # of truth so it can never contradict the authenticity score / MODE tier
+        # (e.g. a 0.86 AUTHENTIC score must not show a SUSPICIOUS badge). The
+        # detector verdict already maps the score through fixed thresholds and
+        # includes the AI-generation rules; the LLM's nuanced reasoning remains
+        # visible in the LLM DETAIL tab. The LLM verdict is only used as a
+        # fallback when the detector verdict is unavailable.
+        SIGNAL_VERDICTS = ("AI_GENERATED", "SUSPICIOUS_AI",
+                           "AUTHENTIC", "SUSPICIOUS", "FORGED")
+        det_verdict = report.get("detection", {}).get("verdict", "UNKNOWN")
+        llm_verdict = llm.get("final_verdict", "UNKNOWN")
+        if det_verdict in SIGNAL_VERDICTS:
+            verdict = det_verdict
+        else:
+            verdict = llm_verdict if llm_verdict not in ("UNKNOWN", None) else det_verdict
+
+        display = VERDICT_DISPLAY.get(verdict, verdict)
         fg, bg  = VERDICT_COLORS.get(verdict, (C["text"], C["bg3"]))
         self._verdict_frame.configure(bg=bg)
-        self._verdict_label.configure(text=f"  {verdict}  ", fg=fg, bg=bg)
+        self._verdict_label.configure(text=f"  {display}  ", fg=fg, bg=bg)
         self._confidence_label.configure(
             text=f"Confidence: {conf}", fg=fg, bg=bg
         )
 
-        self._status_var.set(f"Complete — {verdict}")
+        self._status_var.set(f"Complete — {display}")
         self._populate_verdict_tab(report)
         self._populate_signals_tab(report)
         self._populate_heatmap_tab(report)

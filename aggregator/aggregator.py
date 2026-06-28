@@ -251,12 +251,26 @@ def _summarize_metadata(signals: dict) -> dict:
     meta_flags   = meta.get("metadata_flags", [])
 
     origin = "UNKNOWN"
+    whatsapp = "POSSIBLE_WHATSAPP_RECOMPRESSION" in meta_flags
     if camera_make or camera_model:
         origin = "CAMERA_CAPTURED"
+    elif whatsapp:
+        origin = "SOCIAL_MEDIA_RECOMPRESSED"  # benign: WhatsApp/social re-encode
     elif not has_exif:
         origin = "POSSIBLY_GENERATED_OR_EDITED"  # no EXIF = suspicious
     elif software:
         origin = "COMPUTER_PROCESSED"
+
+    # Metadata score mirrors detector.py: 1.0 = clean, 0.6 = WhatsApp recompress
+    # (partial penalty), 0.5 = other warning flags, 0.0 = critical (AI signature).
+    if "AI_GENERATOR_SIGNATURE" in meta_flags:
+        metadata_score = 0.0
+    elif whatsapp:
+        metadata_score = 0.6
+    elif meta_flags:
+        metadata_score = 0.5
+    else:
+        metadata_score = 1.0
 
     return {
         "available":      True,
@@ -266,6 +280,8 @@ def _summarize_metadata(signals: dict) -> dict:
         "camera_make":    camera_make,
         "camera_model":   camera_model,
         "meta_flags":     meta_flags,
+        "metadata_score": metadata_score,
+        "whatsapp_recompression": whatsapp,
         "editing_software_detected": "EDITING_SOFTWARE_DETECTED" in meta_flags,
     }
 
@@ -320,6 +336,7 @@ def aggregate(detection_result: dict) -> dict:
             "risk_profile":       risk_profile,
             "metadata_summary":   metadata_summary,
             "auth_score_tier":    auth_tier,
+            "signal_verdict":     detection_result.get("verdict", "UNKNOWN"),
             "signal_count":       len(signals),
             "active_flag_count":  len(risk_profile["tamper_flags_active"]),
         }

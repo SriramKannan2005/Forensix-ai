@@ -64,10 +64,20 @@ def extract_metadata(image_path: str) -> dict:
         "image_width":         None,
         "image_height":        None,
         "color_space":         None,
+        "file_size_bytes":     None,
+        "file_size_kb":        None,
         "metadata_flags":      [],
         "metadata_error":      None,
         "raw_exif_count":      0,
     }
+
+    # File size — used to detect social-media recompression (WhatsApp etc.)
+    try:
+        size_bytes = path.stat().st_size
+        result["file_size_bytes"] = size_bytes
+        result["file_size_kb"] = round(size_bytes / 1024.0, 1)
+    except Exception:
+        size_bytes = None
 
     try:
         img = Image.open(image_path)
@@ -139,9 +149,25 @@ def extract_metadata(image_path: str) -> dict:
         if dto and dtd and dto != dtd:
             flags.append("TIMESTAMP_MISMATCH")
 
+        # ── Social-media (WhatsApp) recompression ─────────────────────────────
+        # WhatsApp re-encodes shared photos as JPEG, stripping EXIF down to
+        # nothing (or a handful of orientation/size tags) and compressing the
+        # file well under ~500KB. A JPEG with little/no EXIF AND a small file
+        # size is consistent with this benign social-media pipeline rather than
+        # malicious tampering, so we flag it to soften the metadata penalty.
+        WHATSAPP_MAX_BYTES = 500 * 1024   # 500 KB
+        WHATSAPP_MAX_EXIF  = 4            # "minimal EXIF" threshold
+        minimal_exif = (not result["has_exif"]) or result["raw_exif_count"] <= WHATSAPP_MAX_EXIF
+        if (fmt in ("JPG", "JPEG")
+                and minimal_exif
+                and size_bytes is not None
+                and size_bytes < WHATSAPP_MAX_BYTES):
+            flags.append("POSSIBLE_WHATSAPP_RECOMPRESSION")
+
         result["metadata_flags"] = flags
 
     except Exception as e:
         result["metadata_error"] = str(e)
 
     return result
+
