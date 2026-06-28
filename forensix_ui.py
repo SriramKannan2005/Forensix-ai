@@ -165,6 +165,10 @@ class ForensiXApp(tk.Tk):
         self.last_report   = None
         self._orig_photo   = None
         self._heat_photo   = None
+        self._gradcam_photo = None
+        self.last_gradcam_overlay = None
+        self.last_gradcam_path    = None
+        self.last_report_path     = None
         self._analysis_thread = None
 
         self._build_ui()
@@ -318,6 +322,26 @@ class ForensiXApp(tk.Tk):
                   relief="flat", cursor="hand2", bd=0, padx=8, pady=3,
                   command=self._check_ollama).pack(anchor="w", pady=4)
 
+        # ── Outputs (report / gradcam launchers) ───────────────────────────────
+        out_frame = dark_frame(panel)
+        out_frame.pack(fill="x", padx=14, pady=(12, 0))
+        label(out_frame, "OUTPUTS", font=FONTS["heading"],
+              color=C["text3"], bg=C["bg2"]).pack(anchor="w")
+        separator(out_frame, pady=4)
+
+        out_btns = tk.Frame(out_frame, bg=C["bg2"])
+        out_btns.pack(fill="x")
+        self._report_btn = tk.Button(
+            out_btns, text="Open Report", font=FONTS["mono_sm"],
+            fg=C["text3"], bg=C["bg3"], relief="flat", cursor="hand2",
+            bd=0, padx=8, pady=4, state="disabled", command=self._open_report)
+        self._report_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+        self._gradcam_btn = tk.Button(
+            out_btns, text="View GradCAM", font=FONTS["mono_sm"],
+            fg=C["text3"], bg=C["bg3"], relief="flat", cursor="hand2",
+            bd=0, padx=8, pady=4, state="disabled", command=self._view_gradcam)
+        self._gradcam_btn.pack(side="left", expand=True, fill="x", padx=(3, 0))
+
         # ── Analyse button ────────────────────────────────────────────────────
         btn_frame = tk.Frame(panel, bg=C["bg2"])
         btn_frame.pack(fill="x", padx=14, pady=16, side="bottom")
@@ -386,18 +410,21 @@ class ForensiXApp(tk.Tk):
         self._tab_verdict   = self._make_tab("VERDICT")
         self._tab_signals   = self._make_tab("SIGNALS")
         self._tab_heatmap   = self._make_tab("HEATMAP")
+        self._tab_gradcam   = self._make_tab("GRADCAM")
         self._tab_metadata  = self._make_tab("METADATA")
         self._tab_llm       = self._make_tab("LLM DETAIL")
 
         self._tabs.add(self._tab_verdict,  text=" VERDICT ")
         self._tabs.add(self._tab_signals,  text=" SIGNALS ")
         self._tabs.add(self._tab_heatmap,  text=" HEATMAP ")
+        self._tabs.add(self._tab_gradcam,  text=" GRADCAM ")
         self._tabs.add(self._tab_metadata, text=" METADATA ")
         self._tabs.add(self._tab_llm,      text=" LLM DETAIL ")
 
         self._build_verdict_tab()
         self._build_signals_tab()
         self._build_heatmap_tab()
+        self._build_gradcam_tab()
         self._build_metadata_tab()
         self._build_llm_tab()
 
@@ -476,6 +503,36 @@ class ForensiXApp(tk.Tk):
                      fg=C["text3"], bg=C["bg3"]).pack(pady=(6, 0))
             tk.Label(box, text=val, font=FONTS["heading"],
                      fg=color, bg=C["bg3"]).pack(pady=(0, 6))
+
+        # CNN classifier result card
+        signals = det.get("signals", {})
+        if signals.get("cnn_model_loaded"):
+            cnn_score = signals.get("cnn_score", 0.0) or 0.0
+            cnn_label = signals.get("cnn_label", "UNKNOWN")
+            cnn_conf  = signals.get("cnn_confidence", 0.0) or 0.0
+            cnn_arch  = signals.get("cnn_arch", "?")
+            cnn_acc   = signals.get("cnn_val_acc", 0.0) or 0.0
+            cnn_color = C["red"] if cnn_label == "FORGED" else C["green"]
+
+            cnn_card = tk.Frame(self._verdict_body, bg=C["bg3"])
+            cnn_card.pack(fill="x", pady=(8, 4))
+            tk.Label(cnn_card, text="CNN CLASSIFIER", font=FONTS["mono_sm"],
+                     fg=C["text3"], bg=C["bg3"]).pack(anchor="w", padx=8, pady=(6, 0))
+            tk.Label(cnn_card,
+                     text=f"  Score: {cnn_score:.3f}  |  Label: {cnn_label}  "
+                          f"|  Confidence: {cnn_conf:.1%}",
+                     font=FONTS["heading"], fg=cnn_color, bg=C["bg3"]).pack(
+                         anchor="w", padx=8)
+            tk.Label(cnn_card,
+                     text=f"  Model: {cnn_arch}  |  Val Acc: {cnn_acc:.2%}",
+                     font=FONTS["mono_sm"], fg=C["text2"], bg=C["bg3"]).pack(
+                         anchor="w", padx=8, pady=(0, 6))
+        elif signals.get("cnn_note"):
+            cnn_card = tk.Frame(self._verdict_body, bg=C["bg3"])
+            cnn_card.pack(fill="x", pady=(8, 4))
+            tk.Label(cnn_card, text=f"  CNN: {signals.get('cnn_note')}",
+                     font=FONTS["mono_sm"], fg=C["text3"], bg=C["bg3"],
+                     wraplength=560, justify="left").pack(anchor="w", padx=8, pady=6)
 
         separator(self._verdict_body, pady=6)
 
@@ -641,10 +698,18 @@ class ForensiXApp(tk.Tk):
             tk.Label(row, text=str(val), font=FONTS["mono_sm"],
                      fg=color, bg=C["bg3"]).pack(side="left")
 
-        # CNN stub
-        section("CNN MODEL STATUS")
+        # CNN classifier
+        section("CNN CLASSIFIER")
         signal_row(self._signals_inner, "cnn_model_loaded",
                    signals.get("cnn_model_loaded", False), "", bg=C["bg3"])
+        if signals.get("cnn_model_loaded"):
+            signal_row(self._signals_inner, "cnn_score",
+                       signals.get("cnn_score", "N/A"),
+                       risk.get("cnn_tier", ""), bg=C["bg3"])
+            signal_row(self._signals_inner, "cnn_label",
+                       signals.get("cnn_label", "N/A"), "", bg=C["bg3"])
+            signal_row(self._signals_inner, "cnn_confidence",
+                       signals.get("cnn_confidence", "N/A"), "", bg=C["bg3"])
         note = signals.get("cnn_note", "")
         if note:
             tk.Label(self._signals_inner, text=f"  {note}",
@@ -713,6 +778,83 @@ class ForensiXApp(tk.Tk):
                 text="Heatmap not saved\n(enable 'Save ELA heatmap' option)",
                 image=""
             )
+
+    # ── GradCAM Tab ──────────────────────────────────────────────────────────
+
+    def _build_gradcam_tab(self):
+        t = self._tab_gradcam
+        ctrl = tk.Frame(t, bg=C["bg2"])
+        ctrl.pack(fill="x", padx=12, pady=8)
+        label(ctrl, "CNN ATTENTION MAP",
+              font=FONTS["heading"], color=C["text3"], bg=C["bg2"]).pack(side="left")
+        label(ctrl, "  red regions = highest CNN suspicion",
+              font=FONTS["mono_sm"], color=C["text3"], bg=C["bg2"]).pack(side="left")
+
+        body = tk.Frame(t, bg=C["bg3"])
+        body.pack(fill="both", expand=True, padx=8, pady=4)
+        self._gradcam_canvas = tk.Label(
+            body, bg=C["bg3"],
+            text="Grad-CAM overlay will appear here after analysis",
+            font=FONTS["mono_sm"], fg=C["text3"])
+        self._gradcam_canvas.pack(expand=True, fill="both", padx=4, pady=4)
+
+        self._gradcam_save_btn = tk.Button(
+            t, text="⬇  Save GradCAM to Desktop", font=FONTS["mono_sm"],
+            fg=C["accent"], bg=C["bg3"], relief="flat", cursor="hand2",
+            bd=0, padx=10, pady=6, state="disabled",
+            command=self._save_gradcam_to_desktop)
+        self._gradcam_save_btn.pack(anchor="w", padx=8, pady=6)
+
+    def _populate_gradcam_tab(self, report: dict):
+        gc = report.get("gradcam", {})
+        path = gc.get("output_path") or self.last_gradcam_path
+        err  = gc.get("error")
+
+        if self.last_gradcam_overlay is not None:
+            try:
+                img = self.last_gradcam_overlay.copy()
+                img.thumbnail((640, 560), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self._gradcam_canvas.configure(image=photo, text="")
+                self._gradcam_photo = photo
+                self._gradcam_save_btn.configure(state="normal")
+                return
+            except Exception:
+                pass
+
+        if path and Path(path).exists():
+            try:
+                img = Image.open(path)
+                img.thumbnail((640, 560), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self._gradcam_canvas.configure(image=photo, text="")
+                self._gradcam_photo = photo
+                self._gradcam_save_btn.configure(state="normal")
+                return
+            except Exception:
+                pass
+
+        msg = f"Grad-CAM unavailable\n{err}" if err else "Grad-CAM not generated"
+        self._gradcam_canvas.configure(image="", text=msg)
+        self._gradcam_save_btn.configure(state="disabled")
+
+    def _save_gradcam_to_desktop(self):
+        if self.last_gradcam_overlay is None and not (
+                self.last_gradcam_path and Path(self.last_gradcam_path).exists()):
+            messagebox.showinfo("No GradCAM", "Run analysis first.")
+            return
+        desktop = Path.home() / "Desktop"
+        desktop.mkdir(parents=True, exist_ok=True)
+        stem = Path(self.image_path.get()).stem or "image"
+        dest = desktop / f"forensix_gradcam_{stem}.png"
+        try:
+            if self.last_gradcam_overlay is not None:
+                self.last_gradcam_overlay.save(str(dest))
+            else:
+                Image.open(self.last_gradcam_path).save(str(dest))
+            messagebox.showinfo("Saved", f"GradCAM saved to:\n{dest}")
+        except Exception as e:
+            messagebox.showerror("Save Failed", str(e))
 
     # ── Metadata Tab ─────────────────────────────────────────────────────────
 
@@ -1020,6 +1162,42 @@ class ForensiXApp(tk.Tk):
                     "model_analyses":     {},
                 }
 
+            # ── Step 4: Grad-CAM heatmap ─────────────────────────────────────
+            self._set_status("Generating GradCAM...")
+            self.last_gradcam_overlay = None
+            self.last_gradcam_path    = None
+            try:
+                from modules.image.gradcam import generate_gradcam
+                stem = Path(path).stem
+                gc = generate_gradcam(
+                    image_input=path,
+                    output_path=str(ROOT / "outputs" / "gradcam" / f"{stem}_gradcam.png"),
+                )
+                self.last_gradcam_overlay = gc.get("overlay")
+                self.last_gradcam_path    = gc.get("output_path")
+                report["gradcam"] = {
+                    "output_path":     gc.get("output_path"),
+                    "predicted_class": gc.get("predicted_class"),
+                    "predicted_score": gc.get("predicted_score"),
+                    "error":           gc.get("error"),
+                }
+            except Exception as e:
+                report["gradcam"] = {"error": str(e)}
+
+            # ── Step 5: PDF report ───────────────────────────────────────────
+            self._set_status("Writing PDF report...")
+            self.last_report_path = None
+            try:
+                from modules.reports.pdf_report import generate_report
+                self.last_report_path = generate_report(
+                    image_path=path,
+                    forensic_result=report,
+                    gradcam_overlay=self.last_gradcam_overlay,
+                )
+                report["report_path"] = self.last_report_path
+            except Exception as e:
+                report["report_error"] = str(e)
+
             self.last_report = report
             self.after(0, self._on_success, report)
 
@@ -1046,8 +1224,20 @@ class ForensiXApp(tk.Tk):
         self._populate_verdict_tab(report)
         self._populate_signals_tab(report)
         self._populate_heatmap_tab(report)
+        self._populate_gradcam_tab(report)
         self._populate_metadata_tab(report)
         self._populate_llm_tab(report)
+
+        # Enable output launchers if artifacts were produced
+        self._report_btn.configure(
+            state="normal" if self.last_report_path
+            and Path(self.last_report_path).exists() else "disabled")
+        self._gradcam_btn.configure(
+            state="normal" if (self.last_gradcam_overlay is not None or
+                               (self.last_gradcam_path
+                                and Path(self.last_gradcam_path).exists()))
+            else "disabled")
+
         self._tabs.select(0)
 
     def _on_error(self, msg: str):
@@ -1080,6 +1270,12 @@ class ForensiXApp(tk.Tk):
             )
             self._load_preview(path)
             self.last_report = None
+            self.last_gradcam_overlay = None
+            self.last_gradcam_path    = None
+            self.last_report_path     = None
+            if hasattr(self, "_report_btn"):
+                self._report_btn.configure(state="disabled")
+                self._gradcam_btn.configure(state="disabled")
 
     def _load_preview(self, path: str):
         try:
@@ -1120,6 +1316,33 @@ class ForensiXApp(tk.Tk):
             color = C["red"]
 
         self.after(0, lambda: self._ollama_status.configure(text=txt, fg=color))
+
+    def _open_report(self):
+        if not (self.last_report_path and Path(self.last_report_path).exists()):
+            messagebox.showinfo("No Report", "Run analysis first to generate a PDF report.")
+            return
+        self._open_file(self.last_report_path)
+
+    def _view_gradcam(self):
+        path = self.last_gradcam_path
+        if not (path and Path(path).exists()):
+            messagebox.showinfo("No GradCAM", "Run analysis first to generate a GradCAM.")
+            return
+        self._open_file(path)
+
+    def _open_file(self, path: str):
+        """Open a file with the OS default application (cross-platform)."""
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", path])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            messagebox.showerror("Open Failed", str(e))
 
     def _export_report(self):
         if not self.last_report:

@@ -17,7 +17,12 @@ Signal keys produced (must match aggregator REQUIRED_SIGNALS):
   ai_smooth_flag          — bool: image is suspiciously smooth (AI tell)
   metadata                — full metadata dict from metadata_extractor
   heatmap_path            — path to saved ELA heatmap (if save_heatmap=True)
-  cnn_score               — None (placeholder until model is trained)
+  cnn_score               — P(FORGED) 0–1 from the trained CNN (model_loader)
+  cnn_label               — "AUTHENTIC" | "FORGED" | "UNKNOWN"
+  cnn_confidence          — max softmax probability
+  cnn_arch                — model architecture (e.g. resnet18)
+  cnn_val_acc             — model validation accuracy
+  cnn_model_loaded        — bool: True if the CNN ran successfully
   cnn_note                — human-readable CNN status string
 
 Flag thresholds:
@@ -131,22 +136,54 @@ def analyze_image(image_path: str, save_heatmap: bool = True) -> dict:
         if freq_hr is not None and freq_hr < 0.12:
             flags.append("LOW_FREQ_ENERGY")
 
-        # ── 5. CNN placeholder ─────────────────────────────────────────────────
-        signals["cnn_score"]        = None
-        signals["cnn_model_loaded"] = False
-        signals["cnn_note"]         = (
-            "CNN model not loaded — train and export model to "
-            "modules/image/model.pt to enable deep-learning classification."
-        )
+        # ── 5. CNN deep-learning classifier ────────────────────────────────────
+        from modules.image.model_loader import predict as _cnn_predict
+        _cnn_result = _cnn_predict(str(path))
+        cnn_score      = _cnn_result["cnn_score"]
+        cnn_label      = _cnn_result["cnn_label"]
+        cnn_confidence = _cnn_result["cnn_confidence"]
+        cnn_error      = _cnn_result["cnn_error"]
+
+        signals["cnn_score"]        = cnn_score
+        signals["cnn_label"]        = cnn_label
+        signals["cnn_confidence"]   = cnn_confidence
+        signals["cnn_arch"]         = _cnn_result["cnn_arch"]
+        signals["cnn_val_acc"]      = _cnn_result["cnn_val_acc"]
+        signals["cnn_model_loaded"] = cnn_error is None
+        if cnn_error is None:
+            signals["cnn_note"] = (
+                f"CNN ({_cnn_result['cnn_arch']}, val_acc "
+                f"{_cnn_result['cnn_val_acc']:.2%}) P(forged)={cnn_score:.3f} "
+                f"-> {cnn_label} (confidence {cnn_confidence:.1%})."
+            )
+        else:
+            signals["cnn_note"] = (
+                f"CNN unavailable — {cnn_error}. Train and export a model to "
+                "modules/image/model.pt to enable deep-learning classification."
+            )
+
+        # CNN-based flags
+        if cnn_error is None:
+            if cnn_score > 0.8 and cnn_confidence > 0.85:
+                flags.append("CNN_HIGH_CONFIDENCE_FORGED")
+            elif cnn_score > 0.6:
+                flags.append("CNN_FORGED_PROBABILITY")
 
         # ── 6. Authenticity score ──────────────────────────────────────────────
-        # Weighted blend of available signals:
-        #   ELA is the primary signal (0.50 weight)
-        #   Noise score contributes when available (0.30 weight)
-        #   Metadata origin contributes (0.20 weight)
+        # Weighted blend of available signals. Each component is oriented so that
+        #   0.0 = definitely tampered/forged, 1.0 = definitely authentic.
         #
-        # Each component: 0.0 = definitely tampered, 1.0 = definitely authentic
+        # With CNN available:   CNN 0.40 + ELA 0.25 + Noise 0.20 + Metadata 0.15
+        # Without CNN:          ELA 0.50 + Noise 0.30 + Metadata 0.20
+        #                       (or ELA 0.65 + Metadata 0.35 if noise also missing)
         ela_component   = 1.0 - ela_suspicion
+
+        # CNN component: cnn_score is P(FORGED); authenticity = 1 - P(FORGED).
+        # Only used when the model loaded cleanly (cnn_error is None).
+        if cnn_error is None and cnn_score is not None:
+            cnn_component = 1.0 - float(cnn_score)
+        else:
+            cnn_component = None
 
         noise_val = noise_sigs.get("noise_score")
         if noise_val is not None:
@@ -170,19 +207,18 @@ def analyze_image(image_path: str, save_heatmap: bool = True) -> dict:
             meta_penalty = 0.15
         meta_component = 1.0 - meta_penalty
 
-        # Blend
+        # Blend — re-normalise weights over whichever components are available so
+        # the score always stays in [0, 1] even when noise or CNN is missing.
+        weighted = []   # (weight, component) pairs
+        if cnn_component is not None:
+            weighted.append((0.40, cnn_component))
+        weighted.append((0.25 if cnn_component is not None else 0.50, ela_component))
         if noise_component is not None:
-            authenticity_score = (
-                0.50 * ela_component +
-                0.30 * noise_component +
-                0.20 * meta_component
-            )
-        else:
-            # Noise unavailable — reweight to ELA + metadata
-            authenticity_score = (
-                0.65 * ela_component +
-                0.35 * meta_component
-            )
+            weighted.append((0.20 if cnn_component is not None else 0.30, noise_component))
+        weighted.append((0.15 if cnn_component is not None else 0.20, meta_component))
+
+        total_w = sum(w for w, _ in weighted)
+        authenticity_score = sum(w * c for w, c in weighted) / total_w
 
         # Hard floor: if LOW_FREQ_ENERGY or AI_SMOOTH_DETECTED, cap score at 0.50
         if "LOW_FREQ_ENERGY" in flags or "AI_SMOOTH_DETECTED" in flags:

@@ -1,0 +1,13 @@
+# ForensiX AI — Python dependencies (Python 3.9)
+# Install torch/torchvision with the CUDA build matching your GPU; the pinned
+# versions below target CUDA 12.1 (RTX 4060). For CPU-only, install the plain
+# wheels from pypi instead.
+
+torch==2.5.1
+torchvision==0.20.1
+numpy==2.0.2
+pillow==11.3.0
+opencv-python==4.13.0.92
+reportlab==5.0.0
+requests==2.32.5
+tqdm==4.68.3

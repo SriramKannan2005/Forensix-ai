@@ -48,6 +48,9 @@ def build_visual_analyst_prompt(forensix_result: dict) -> str:
     freq_high_ratio  = signals.get("freq_high_ratio", "N/A")
     ai_smooth        = signals.get("ai_smooth_flag", False)
     heatmap_path     = signals.get("heatmap_path", None)
+    cnn_score        = signals.get("cnn_score")
+    cnn_confidence   = signals.get("cnn_confidence", 0.0) or 0.0
+    cnn_label        = signals.get("cnn_label", "UNKNOWN")
 
     # Aggregator enrichment
     agg          = forensix_result.get("aggregator", {})
@@ -95,8 +98,15 @@ Overall Risk Level:    {overall_risk}
 ELA Suspicion Tier:    {ela_tier}
 Noise Texture Tier:    {noise_tier}
 Frequency Tier:        {freq_tier}
-Signals in Warning:    {warn_count} / 9
-Signals in Critical:   {crit_count} / 8
+Signals in Warning:    {warn_count} / 10
+Signals in Critical:   {crit_count} / 9
+
+═══ CNN FORGERY CLASSIFIER ═══
+CNN Forgery Classifier Score: {f"{cnn_score:.3f}" if cnn_score is not None else "UNAVAILABLE"} (0=authentic, 1=forged)
+CNN Confidence: {cnn_confidence:.3f} | CNN Label: {cnn_label}
+Trained on 110k images (CIFAKE + CASIA v2), val_acc 95.89%.
+Weight this heavily. If cnn_score > 0.8, lean toward FORGED unless other signals
+strongly contradict.
 
 {'═══ ELA HEATMAP ═══' if heatmap_path else ''}
 {'An ELA heatmap has been attached. Bright/red regions = high compression inconsistency = likely tampered zones.' if heatmap_path else ''}
@@ -152,6 +162,8 @@ def build_metadata_analyst_prompt(forensix_result: dict) -> str:
     raw_exif_count = metadata.get("raw_exif_count", 0)
     meta_flags    = metadata.get("metadata_flags", [])
     meta_error    = metadata.get("metadata_error", None)
+    cnn_score      = signals.get("cnn_score")
+    cnn_confidence = signals.get("cnn_confidence", 0.0) or 0.0
 
     # Aggregator metadata summary
     agg          = forensix_result.get("aggregator", {})
@@ -197,6 +209,10 @@ TIMESTAMP_MISMATCH:      {'⚠ YES — DateTimeOriginal ≠ DateTimeDigitized; i
 ═══ AGGREGATOR INTERPRETATION ═══
 Aggregated Origin Guess: {origin_guess}
 Overall Risk Level:      {overall_risk}
+
+═══ CNN FORGERY CLASSIFIER ═══
+CNN classifier score: {f"{cnn_score:.3f}" if cnn_score is not None else "UNAVAILABLE"} (confidence: {cnn_confidence:.3f})
+Treat as strong corroborating or conflicting evidence.
 
 ═══ CRITICAL FORENSIC CONTEXT ═══
 A PNG file with no EXIF, no camera data, and no software tag is the standard output
@@ -259,6 +275,8 @@ def build_ai_pattern_analyst_prompt(forensix_result: dict) -> str:
     software_tag    = signals.get("metadata", {}).get("software_tag", "NOT FOUND")
     meta_flags      = signals.get("metadata", {}).get("metadata_flags", [])
     cnn_note        = signals.get("cnn_note", "CNN not loaded")
+    cnn_score       = signals.get("cnn_score")
+    cnn_confidence  = signals.get("cnn_confidence", 0.0) or 0.0
 
     # Aggregator risk
     agg      = forensix_result.get("aggregator", {})
@@ -310,6 +328,11 @@ ELA Suspicion Score:   {ela_suspicion}  (NOTE: AI-generated PNGs often score low
 ELA Regional Variance: {ela_variance}
 High-Energy Ratio:     {energy_ratio}
 CNN Model Status:      {cnn_note}
+
+═══ CNN AI-DETECTION SCORE ═══
+CNN AI-detection score: {f"{cnn_score:.3f}" if cnn_score is not None else "UNAVAILABLE"} (confidence: {cnn_confidence:.3f})
+CNN trained on CIFAKE (60k AI-generated vs real).
+If cnn_score > 0.75, treat as strong evidence of AI generation.
 
 ═══ AI TAMPERING PATTERNS REFERENCE ═══
 • ChatGPT/DALL-E full generation: MISSING_EXIF_ON_PNG + NO_CAMERA_DATA + very low noise_cv + low freq_high_ratio

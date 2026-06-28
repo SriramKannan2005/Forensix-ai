@@ -87,6 +87,15 @@ FREQ_HIGH_RATIO_TIERS = [
     (1.00,  "HIGH_FREQ_HEAVY"),
 ]
 
+# CNN forged-probability tiers (P(FORGED) from the trained classifier)
+CNN_SCORE_TIERS = [
+    (0.20, "LIKELY_AUTHENTIC"),
+    (0.40, "PROBABLY_AUTHENTIC"),
+    (0.60, "UNCERTAIN"),
+    (0.80, "PROBABLY_FORGED"),
+    (1.00, "LIKELY_FORGED"),
+]
+
 # Noise block CV: how variable is local noise across the image?
 NOISE_CV_TIERS = [
     (0.08, "AI_SMOOTH"),
@@ -143,6 +152,16 @@ def _build_risk_profile(signals: dict, flags: list) -> dict:
     freq_hr  = signals.get("freq_high_ratio")
     ai_smooth = signals.get("ai_smooth_flag", False)
 
+    # CNN signals (trained deep-learning classifier). cnn_score is P(FORGED).
+    # cnn_model_loaded gates whether the score is trustworthy; if the model is
+    # unavailable we skip CNN-based signals gracefully.
+    cnn_loaded = signals.get("cnn_model_loaded", False)
+    cnn_score  = signals.get("cnn_score") if cnn_loaded else None
+    cnn_conf   = signals.get("cnn_confidence", 0.0) if cnn_loaded else 0.0
+    cnn_forged_probability      = cnn_score is not None and cnn_score > 0.6
+    cnn_high_confidence_forged  = (cnn_score is not None and cnn_score > 0.8
+                                   and cnn_conf > 0.85)
+
     # Metadata-derived risk indicators
     meta_flags = signals.get("metadata", {}).get("metadata_flags", [])
     has_ai_sig   = "AI_GENERATOR_SIGNATURE" in meta_flags
@@ -164,8 +183,16 @@ def _build_risk_profile(signals: dict, flags: list) -> dict:
         "ai_smooth_detected":    ai_smooth,
         "ai_generator_signature": has_ai_sig,
 
+        # CNN (trained classifier) interpretation
+        "cnn_score":                 cnn_score,
+        "cnn_loaded":                cnn_loaded,
+        "cnn_tier":                  (_tier(cnn_score, CNN_SCORE_TIERS)
+                                      if cnn_score is not None else "UNAVAILABLE"),
+        "cnn_forged_probability":    cnn_forged_probability,
+        "cnn_high_confidence_forged": cnn_high_confidence_forged,
+
         # ── Warning signals (any single indicator that something is off) ───────
-        # Expanded from 5 to 9 signals now that we have metadata + noise + freq
+        # Expanded to include the trained CNN's forged-probability signal.
         "signals_in_warning": sum([
             ela_s > 0.35,                              # ELA
             ela_m > 12.0,
@@ -176,6 +203,7 @@ def _build_risk_profile(signals: dict, flags: list) -> dict:
             freq_hr is not None and freq_hr < 0.15,   # low-freq spectrum
             missing_exif,                              # metadata
             no_camera,
+            cnn_forged_probability,                    # CNN P(forged) > 0.6
         ]),
         "signals_in_critical": sum([
             ela_s > 0.55,
@@ -186,6 +214,7 @@ def _build_risk_profile(signals: dict, flags: list) -> dict:
             ai_smooth,                                 # AI-smooth is critical
             has_ai_sig,                                # explicit AI sig is critical
             freq_hr is not None and freq_hr < 0.09,   # extreme smoothness
+            cnn_high_confidence_forged,                # CNN high-confidence forged
         ]),
         "tamper_flags_active": [f for f in flags if "ERROR" not in f],
     }
